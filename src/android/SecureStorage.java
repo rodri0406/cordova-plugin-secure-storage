@@ -20,8 +20,8 @@ import javax.crypto.Cipher;
 
 public class SecureStorage extends CordovaPlugin {
     private static final String TAG = "SecureStorage";
-
-    private static final boolean SUPPORTED = Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP;
+    private static final boolean SUPPORTED = Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP
+    private static final boolean API_29_ANDROID = Build.VERSION.SDK_INT > Build.VERSION_CODES.P;
 
     private static final String MSG_NOT_SUPPORTED = "API 21 (Android 5.0 Lollipop) is required. This device is running API " + Build.VERSION.SDK_INT;
     private static final String MSG_DEVICE_NOT_SECURE = "Device is not secure";
@@ -73,25 +73,17 @@ public class SecureStorage extends CordovaPlugin {
             callbackContext.error(MSG_NOT_SUPPORTED);
             return false;
         }
+
         if ("init".equals(action)) {
-            String service = args.getString(0);
-            String alias = service2alias(service);
-            INIT_SERVICE = service;
 
-            SharedPreferencesHandler PREFS = new SharedPreferencesHandler(alias, getContext());
-            SERVICE_STORAGE.put(service, PREFS);
-
-            if (!isDeviceSecure()) {
-                Log.e(TAG, MSG_DEVICE_NOT_SECURE);
-                callbackContext.error(MSG_DEVICE_NOT_SECURE);
-            } else if (!RSA.isEntryAvailable(alias)) {
-                initContext = callbackContext;
-                unlockCredentials();
-            } else {
-                initSuccess(callbackContext);
+            if(API_29_ANDROID){
+                return initNewAndroidVersion(args, callbackContext);
             }
-            return true;
+
+            return initOldAndroidVersion(args, callbackContext);
+
         }
+
         if ("set".equals(action)) {
             final String service = args.getString(0);
             final String key = args.getString(1);
@@ -168,6 +160,63 @@ public class SecureStorage extends CordovaPlugin {
         return false;
     }
 
+    private boolean initOldAndroidVersion(CordovaArgs args, final CallbackContext callbackContext){
+        String service = args.getString(0);
+        JSONObject options = args.getJSONObject(1);
+        String packageName = options.optString("packageName", getContext().getPackageName());
+
+        Context ctx = null;
+
+        // Solves #151. By default, we use our own ApplicationContext
+        // If packageName is provided, we try to get the Context of another Application with that packageName
+        try {
+            ctx = getPackageContext(packageName);
+        } catch (Exception e) {
+            // This will fail if the application with given packageName is not installed
+            // OR if we do not have required permissions and cause a security violation
+            Log.e(TAG, "Init failed :", e);
+            callbackContext.error(e.getMessage());
+        }
+
+        INIT_PACKAGENAME = ctx.getPackageName();
+        String alias = oldVersionService2alias(service);
+        INIT_SERVICE = service;
+
+        SharedPreferencesHandler PREFS = new SharedPreferencesHandler(alias, ctx);
+        SERVICE_STORAGE.put(service, PREFS);
+
+        if (!isDeviceSecure()) {
+            Log.e(TAG, MSG_DEVICE_NOT_SECURE);
+            callbackContext.error(MSG_DEVICE_NOT_SECURE);
+        } else if (!RSA.isEntryAvailable(alias)) {
+            initContext = callbackContext;
+            unlockCredentials();
+        } else {
+            initSuccess(callbackContext);
+        }
+        return true;
+    }
+
+    private boolean initNewAndroidVersion(CordovaArgs args, final CallbackContext callbackContext){
+        String service = args.getString(0);
+        String alias = newVersionService2alias(service);
+        INIT_SERVICE = service;
+
+        SharedPreferencesHandler PREFS = new SharedPreferencesHandler(alias, getContext());
+        SERVICE_STORAGE.put(service, PREFS);
+
+        if (!isDeviceSecure()) {
+            Log.e(TAG, MSG_DEVICE_NOT_SECURE);
+            callbackContext.error(MSG_DEVICE_NOT_SECURE);
+            return true;
+        }
+
+        Log.i("INFO", "Device is below API28, hence calling unlockCreds");
+        initContext = callbackContext;
+        unlockCredentials();
+        return true;
+    }
+
     private boolean isDeviceSecure() {
         KeyguardManager keyguardManager = (KeyguardManager)(getContext().getSystemService(Context.KEYGUARD_SERVICE));
         try {
@@ -179,9 +228,14 @@ public class SecureStorage extends CordovaPlugin {
         }
     }
 
-    private String service2alias(String service) {
+
+    private String newVersionService2alias(String service) {
         String res = getContext().getPackageName() + "." + service;
         return  res;
+    }
+
+    private String oldVersionService2alias(String service) {
+        return INIT_PACKAGENAME + "." + service;
     }
 
     private SharedPreferencesHandler getStorage(String service) {
@@ -201,8 +255,17 @@ public class SecureStorage extends CordovaPlugin {
         });
     }
 
-    private Context getContext() {
-        return cordova.getActivity().getApplicationContext();
+    private Context getPackageContext(String packageName) throws Exception {
+        Context pkgContext = null;
+
+        Context context = getContext();
+        if (context.getPackageName().equals(packageName)) {
+            pkgContext = context;
+        } else {
+            pkgContext = context.createPackageContext(packageName, 0);
+        }
+
+        return pkgContext;
     }
 
     private void startActivity(Intent intent) {
